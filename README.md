@@ -109,4 +109,8 @@ Embedding, registration, and delivery-status endpoints: [examples/](./examples/)
 - [Next.js App Router](./examples/nextjs/)
 - [Express](./examples/express/server.ts)
 
+## Integrations
+
+- [SafariCharge billing](./integrations/safaricharge/) — a multi-tenant billing layer over four rails: STK Push, C2B, B2C, and Stripe Checkout, settling into one org plan-tier grant. Covers the two M-Pesa rails this library deliberately leaves out; has no poll fallback or reconciliation of its own.
+
 MIT
