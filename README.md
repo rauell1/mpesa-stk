@@ -1,8 +1,20 @@
 # mpesa-stk
 
+M-PESA for TypeScript, in two packages you can use separately or together.
+
+| Package | Covers | Use it when |
+|---|---|---|
+| **`mpesa-stk`** (this one) | STK Push, end to end | You need the STK lifecycle done properly — idempotency, dedup, a poll fallback, reconciliation, a signing relay |
+| **[`mpesa-billing`](./packages/mpesa-billing/)** | STK Push, C2B, B2C, B2B, Stripe Checkout | You need more than one rail, settling through one exactly-once contract |
+
+Node 18+ · Postgres · zero-config TypeScript types. Start with `mpesa-billing` if you
+want the other rails; everything below is `mpesa-stk` itself.
+
+---
+
 The M-Pesa STK Push lifecycle, done properly. Daraja gives you "send a push" and "receive one callback" — this library is everything in between: idempotent initiation, atomic callback dedup, a polling fallback, and reconciliation.
 
-TypeScript · Node 18+ · Postgres. STK Push only — no B2C, C2B, balance, or reversals.
+TypeScript · Node 18+ · Postgres. STK Push only — for B2C, C2B, B2B, or cards, use [`mpesa-billing`](./packages/mpesa-billing/).
 
 ## Why
 
