@@ -7,8 +7,19 @@
  * every rail settles the same way.
  */
 
+import type { Money } from './money.js'
+
 /** Which payment rail a record belongs to. */
-export type Rail = 'stk' | 'c2b' | 'b2c' | 'stripe'
+export type Rail = 'stk' | 'c2b' | 'b2c' | 'b2b' | 'stripe'
+
+export const RAILS: readonly Rail[] = ['stk', 'c2b', 'b2c', 'b2b', 'stripe']
+
+/** Rails where money leaves the business rather than arriving. */
+export const PAYOUT_RAILS: readonly Rail[] = ['b2c', 'b2b']
+
+export function isPayoutRail(rail: Rail): boolean {
+  return PAYOUT_RAILS.includes(rail)
+}
 
 /**
  * Three states, deliberately. Providers report a dozen failure modes between
@@ -30,16 +41,23 @@ export interface BillingPayment {
   reference: string
   /**
    * The provider's handle, unique per rail — CheckoutRequestID (STK),
-   * TransID (C2B), ConversationID (B2C), or the Checkout session id (Stripe).
-   * This is the webhook key and the deduplication key.
+   * TransID (C2B), ConversationID (B2C/B2B), or the Checkout session id
+   * (Stripe). This is the webhook key and the deduplication key.
    */
   providerRef: string
-  /** Decimal string; never a float. KES amounts from Daraja are whole numbers. */
-  amount: string
-  /** ISO-4217, lowercase for Stripe's sake ('kes', 'usd'). */
-  currency: string
+  /**
+   * What was requested, in minor units with its currency attached. See
+   * money.ts: a bare number cannot distinguish USD 5.00 from KES 500.
+   */
+  amount: Money
+  /**
+   * What the provider says actually moved, once it has told us. Usually equal
+   * to `amount`; on C2B it is the only amount there is, and on a partially
+   * settled rail it is the one to trust. Absent until settlement.
+   */
+  settledAmount?: Money
   status: PaymentStatus
-  /** Who paid or was paid — an MSISDN for M-PESA, a customer id for Stripe. */
+  /** Who paid or was paid — an MSISDN for M-PESA, a shortcode for B2B, a customer id for Stripe. */
   payerRef?: string
   /** M-PESA receipt number, or the Stripe PaymentIntent id. */
   receipt?: string
@@ -71,12 +89,25 @@ export interface WebhookResult {
   duplicate: boolean
 }
 
+/**
+ * Per-delivery context your framework binding can supply. Everything is
+ * optional; without it the handlers behave exactly as they did before.
+ */
+export interface WebhookContext {
+  /**
+   * The IP the delivery came from. Checked against `trustedMpesaIps` when that
+   * option is set — Safaricom signs nothing, so for the C2B confirmation this
+   * is the only thing standing between an open endpoint and a forged payment.
+   */
+  sourceIp?: string
+}
+
 export type MpesaEnvironment = 'sandbox' | 'live'
 
 export interface DarajaConfig {
   consumerKey: string
   consumerSecret: string
-  /** Paybill or till number used for STK Push and C2B. */
+  /** Paybill or till number used for STK Push, C2B, and as PartyA on payouts. */
   shortCode: string
   /** STK Push passkey from the Daraja portal. */
   passKey: string
@@ -85,11 +116,16 @@ export interface DarajaConfig {
   callbackBaseUrl: string
   /** Override the default callback paths if your routes live elsewhere. */
   callbackPaths?: Partial<CallbackPaths>
-  /** B2C only — API operator username. */
+  /** Payouts (B2C and B2B) only — API operator username. */
   initiatorName?: string
-  /** B2C only — operator password, encrypted per request. */
+  /** Payouts only — operator password, encrypted per request. */
   initiatorPassword?: string
-  /** B2C only — Safaricom's public certificate (PEM) for this environment. */
+  /**
+   * Payouts only — Safaricom's public certificate (PEM) for this environment.
+   * Sandbox and production ship different files. Literal `\n` escapes are
+   * accepted, because that is how most platforms hand a certificate to a
+   * process through an environment variable.
+   */
   securityCertificate?: string
   /** Per-request budget in ms. Default 30000. */
   timeoutMs?: number
@@ -101,6 +137,8 @@ export interface CallbackPaths {
   c2bConfirmation: string
   b2cResult: string
   b2cTimeout: string
+  b2bResult: string
+  b2bTimeout: string
 }
 
 export const DEFAULT_CALLBACK_PATHS: CallbackPaths = {
@@ -109,6 +147,8 @@ export const DEFAULT_CALLBACK_PATHS: CallbackPaths = {
   c2bConfirmation: '/api/webhooks/mpesa/c2b/confirmation',
   b2cResult: '/api/webhooks/mpesa/b2c/result',
   b2cTimeout: '/api/webhooks/mpesa/b2c/timeout',
+  b2bResult: '/api/webhooks/mpesa/b2b/result',
+  b2bTimeout: '/api/webhooks/mpesa/b2b/timeout',
 }
 
 export interface StripeConfig {

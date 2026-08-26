@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { createHmac } from 'node:crypto'
 import { Billing } from '../src/billing.js'
 import { MemoryStore } from '../src/adapters/memory.js'
+import { fromMajor } from '../src/money.js'
 import type { BillingPayment, StripeConfig } from '../src/types.js'
 
 // The property that matters on every rail: N deliveries of the same payment
@@ -31,8 +32,7 @@ async function seedPendingStk(store: MemoryStore, providerRef: string): Promise<
     rail: 'stk',
     reference: 'ORDER-42',
     providerRef,
-    amount: '500',
-    currency: 'kes',
+    amount: fromMajor(500, 'KES'),
     status: 'PENDING',
     createdAt: new Date(),
   })
@@ -191,8 +191,7 @@ describe('B2C', () => {
       rail: 'b2c',
       reference: 'REFUND-7',
       providerRef: 'AG_1',
-      amount: '250',
-      currency: 'kes',
+      amount: fromMajor(250, 'KES'),
       status: 'PENDING',
       createdAt: new Date(),
     })
@@ -250,8 +249,8 @@ describe('Stripe webhook', () => {
       rail: 'stripe',
       reference: 'ORDER-42',
       providerRef: 'cs_test_1',
-      amount: '2000',
-      currency: 'usd',
+      // USD 20.00 — 2000 minor units, not two thousand dollars.
+      amount: fromMajor('20.00', 'USD'),
       status: 'PENDING',
       createdAt: new Date(),
     })

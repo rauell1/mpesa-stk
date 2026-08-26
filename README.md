@@ -106,13 +106,14 @@ Embedding, registration, and delivery-status endpoints: [examples/](./examples/)
 
 ## Examples
 
-- [Next.js App Router](./examples/nextjs/)
-- [Express](./examples/express/server.ts)
+- [Next.js App Router](./examples/nextjs/) — STK Push with `mpesa-stk`
+- [Express](./examples/express/server.ts) — STK Push with `mpesa-stk`
+- [All rails](./examples/billing-node/) — STK, C2B, B2C, B2B and Stripe with `mpesa-billing`
 
 ## Also in this repo
 
-**[`mpesa-billing`](./packages/mpesa-billing/)** — a sibling package covering four rails with one settlement contract: STK Push, C2B, B2C, and Stripe Checkout. It handles the two M-Pesa rails this library deliberately leaves out, plus a card rail, and gives them all the same exactly-once guard — but it has no poll fallback and no reconciliation, so for STK Push alone this library is the better tool. Use both together: this library for the STK lifecycle, `mpesa-billing`'s `applyOnSettle` for whatever a settled payment should cause.
+**[`mpesa-billing`](./packages/mpesa-billing/)** — a sibling package covering five rails with one settlement contract: STK Push, C2B, B2C, B2B, and Stripe Checkout. It handles the three M-Pesa rails this library deliberately leaves out, plus a card rail, and gives them all the same exactly-once guard. Every amount carries its currency in minor units, so KES 500 and USD 5.00 stay distinguishable end to end. It has no poll fallback and no reconciliation, so for STK Push alone this library is the better tool. Use both together: this library for the STK lifecycle, `mpesa-billing`'s `applyOnSettle` for whatever a settled payment should cause.
 
-[SafariCharge](./examples/safaricharge/) is a worked example of it — multi-tenant plan tiers over all four rails.
+[examples/billing-node](./examples/billing-node/) shows it wired into a project, on Next.js and Express.
 
 MIT

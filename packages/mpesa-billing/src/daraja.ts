@@ -1,12 +1,13 @@
 /**
- * Daraja HTTP calls: OAuth, STK Push, C2B URL registration, B2C payouts.
+ * Daraja HTTP calls: OAuth, STK Push, C2B URL registration, B2C and B2B
+ * payouts.
  *
  * These are the outbound half. The inbound half — what Safaricom POSTs back —
  * lives in callbacks.ts.
  */
 
 import {
-  assertWholeAmount,
+  assertShortCode,
   baseUrl,
   callbackUrl,
   eatTimestamp,
@@ -15,6 +16,7 @@ import {
   securityCredential,
   stkPassword,
 } from './config.js'
+import { toDarajaAmount, type Money } from './money.js'
 import type { BillingStore } from './adapters/types.js'
 import type { DarajaConfig } from './types.js'
 
@@ -45,12 +47,16 @@ export interface RegisterUrlResponse {
   ResponseDescription: string
 }
 
-export interface B2CResponse {
+/** Both payout rails acknowledge the same way. */
+export interface PayoutResponse {
   ConversationID: string
   OriginatorConversationID: string
   ResponseCode: string
   ResponseDescription: string
 }
+
+export type B2CResponse = PayoutResponse
+export type B2BResponse = PayoutResponse
 
 function timeout(config: DarajaConfig): number {
   return config.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -92,9 +98,26 @@ export async function getAccessToken(config: DarajaConfig, store: BillingStore):
   return body.access_token
 }
 
+/** Every Daraja error shape we have seen, in one place. */
+function darajaError(call: string, status: number, body: DarajaErrorBody): Error {
+  const detail = body.errorMessage ?? body.ResponseDescription ?? body.ResultDesc
+  return new Error(`Daraja ${call} failed (HTTP ${status})${detail ? `: ${detail}` : ''}`)
+}
+
+interface DarajaErrorBody {
+  errorCode?: string
+  errorMessage?: string
+  ResponseDescription?: string
+  ResultDesc?: string
+}
+
+async function readJson<T>(res: Response): Promise<Partial<T> & DarajaErrorBody> {
+  return (await res.json().catch(() => ({}))) as Partial<T> & DarajaErrorBody
+}
+
 export interface StkPushParams {
   phoneNumber: string
-  amount: number
+  amount: Money
   /**
    * Shown on the prompt and the customer's statement. Daraja truncates at 12
    * characters, so a bare UUID is not usable — the payment is attributed by
@@ -103,6 +126,8 @@ export interface StkPushParams {
   accountReference: string
   /** Truncated at 13 characters by Daraja. */
   description: string
+  /** `CustomerPayBillOnline` for a paybill, `CustomerBuyGoodsOnline` for a till. */
+  transactionType?: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline'
 }
 
 export async function stkPush(
@@ -110,7 +135,7 @@ export async function stkPush(
   store: BillingStore,
   params: StkPushParams,
 ): Promise<StkPushResponse> {
-  const amount = assertWholeAmount(params.amount)
+  const amount = toDarajaAmount(params.amount)
   const phone = normalisePhone(params.phoneNumber)
   const timestamp = eatTimestamp()
   const token = await getAccessToken(config, store)
@@ -124,7 +149,7 @@ export async function stkPush(
         BusinessShortCode: config.shortCode,
         Password: stkPassword(config.shortCode, config.passKey, timestamp),
         Timestamp: timestamp,
-        TransactionType: 'CustomerPayBillOnline',
+        TransactionType: params.transactionType ?? 'CustomerPayBillOnline',
         Amount: amount,
         PartyA: phone,
         PartyB: config.shortCode,
@@ -137,15 +162,9 @@ export async function stkPush(
     timeout(config),
   )
 
-  const body = (await res.json().catch(() => ({}))) as Partial<StkPushResponse> & {
-    errorCode?: string
-    errorMessage?: string
-  }
-
+  const body = await readJson<StkPushResponse>(res)
   if (!res.ok || body.errorCode || !body.CheckoutRequestID) {
-    throw new Error(
-      `Daraja STK Push failed (HTTP ${res.status})${body.errorMessage ? `: ${body.errorMessage}` : ''}`,
-    )
+    throw darajaError('STK Push', res.status, body)
   }
 
   return body as StkPushResponse
@@ -186,23 +205,36 @@ export async function registerC2BUrls(
     timeout(config),
   )
 
-  const body = (await res.json().catch(() => ({}))) as Partial<RegisterUrlResponse> & {
-    errorMessage?: string
-  }
-
+  const body = await readJson<RegisterUrlResponse>(res)
   if (!res.ok || body.ResponseCode !== '0') {
-    const detail = body.errorMessage ?? body.ResponseDescription
-    throw new Error(`C2B URL registration failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}`)
+    throw darajaError('C2B URL registration', res.status, body)
   }
 
   return body as RegisterUrlResponse
+}
+
+/** Payout rails both need an operator identity Daraja can decrypt. */
+function requirePayoutCredentials(config: DarajaConfig, rail: string): {
+  initiatorName: string
+  securityCredential: string
+} {
+  const { initiatorName, initiatorPassword, securityCertificate } = config
+  if (!initiatorName || !initiatorPassword || !securityCertificate) {
+    throw new Error(
+      `${rail} requires initiatorName, initiatorPassword and securityCertificate in the Daraja config`,
+    )
+  }
+  return {
+    initiatorName,
+    securityCredential: securityCredential(initiatorPassword, securityCertificate),
+  }
 }
 
 export type B2CCommand = 'BusinessPayment' | 'SalaryPayment' | 'PromotionPayment'
 
 export interface B2CParams {
   phoneNumber: string
-  amount: number
+  amount: Money
   remarks: string
   occasion?: string
   /** Default BusinessPayment — a refund, not salary and not a promotion. */
@@ -210,23 +242,19 @@ export interface B2CParams {
 }
 
 /**
- * Daraja acknowledges a payout request and reports the real outcome later on
- * the result URL, or on the timeout URL if it expired in the queue. A '0'
- * response here means "accepted for processing", not "paid".
+ * Pay out to a customer's phone.
+ *
+ * Daraja acknowledges the request and reports the real outcome later on the
+ * result URL, or on the timeout URL if it expired in the queue. A '0' response
+ * here means "accepted for processing", not "paid".
  */
 export async function b2cPaymentRequest(
   config: DarajaConfig,
   store: BillingStore,
   params: B2CParams,
 ): Promise<B2CResponse> {
-  const { initiatorName, initiatorPassword, securityCertificate } = config
-  if (!initiatorName || !initiatorPassword || !securityCertificate) {
-    throw new Error(
-      'B2C requires initiatorName, initiatorPassword and securityCertificate in the Daraja config',
-    )
-  }
-
-  const amount = assertWholeAmount(params.amount)
+  const { initiatorName, securityCredential: credential } = requirePayoutCredentials(config, 'B2C')
+  const amount = toDarajaAmount(params.amount)
   const token = await getAccessToken(config, store)
 
   const res = await fetchWithTimeout(
@@ -236,7 +264,7 @@ export async function b2cPaymentRequest(
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({
         InitiatorName: initiatorName,
-        SecurityCredential: securityCredential(initiatorPassword, securityCertificate),
+        SecurityCredential: credential,
         CommandID: params.commandId ?? 'BusinessPayment',
         Amount: amount,
         PartyA: config.shortCode,
@@ -250,14 +278,118 @@ export async function b2cPaymentRequest(
     timeout(config),
   )
 
-  const body = (await res.json().catch(() => ({}))) as Partial<B2CResponse> & {
-    errorMessage?: string
-  }
-
+  const body = await readJson<B2CResponse>(res)
   if (!res.ok || body.ResponseCode !== '0' || !body.ConversationID) {
-    const detail = body.errorMessage ?? body.ResponseDescription
-    throw new Error(`Daraja B2C request failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}`)
+    throw darajaError('B2C request', res.status, body)
   }
 
   return body as B2CResponse
+}
+
+/**
+ * What the receiving business is being paid *for*.
+ *
+ * - `BusinessPayBill` — pay another organisation's paybill. Needs an
+ *   `accountReference`: it is the account number on their statement.
+ * - `BusinessBuyGoods` — pay a till. No account number.
+ * - `DisburseFundsToBusiness` — move funds to a business you control.
+ * - `BusinessToBusinessTransfer` — between two shortcodes you control.
+ */
+export type B2BCommand =
+  | 'BusinessPayBill'
+  | 'BusinessBuyGoods'
+  | 'DisburseFundsToBusiness'
+  | 'BusinessToBusinessTransfer'
+
+/** Daraja's identifier types. 4 = paybill, 2 = till. */
+export type B2BIdentifierType = '1' | '2' | '4'
+
+export interface B2BParams {
+  /** The shortcode being paid — a paybill or till, never a phone number. */
+  receiverShortCode: string
+  amount: Money
+  /**
+   * The account number on the receiving organisation's statement. Required by
+   * Daraja for `BusinessPayBill`, ignored for `BusinessBuyGoods`.
+   */
+  accountReference?: string
+  remarks: string
+  /** Default BusinessPayBill — paying another organisation's paybill. */
+  commandId?: B2BCommand
+  /** What kind of shortcode is paying. Default 4 (paybill). */
+  senderIdentifierType?: B2BIdentifierType
+  /** What kind of shortcode is being paid. Default 4 (paybill), 2 for a till. */
+  receiverIdentifierType?: B2BIdentifierType
+  /**
+   * MSISDN of the person on whose behalf you are paying. Optional; Safaricom
+   * sends them a confirmation when it is set.
+   */
+  requesterPhoneNumber?: string
+}
+
+/**
+ * Pay another business — paybill to paybill, or paybill to till.
+ *
+ * The shape differs from B2C in three ways that are easy to get wrong, and
+ * each fails as an unhelpful generic error:
+ *
+ * - the operator field is `Initiator`, not `InitiatorName`;
+ * - `PartyB` is a shortcode, so it must not go through phone normalisation;
+ * - Safaricom's own field is spelled `RecieverIdentifierType`. That typo is
+ *   part of the wire format and is reproduced deliberately.
+ *
+ * Like B2C, a '0' response means "accepted for processing". The outcome
+ * arrives on the B2B result URL.
+ */
+export async function b2bPaymentRequest(
+  config: DarajaConfig,
+  store: BillingStore,
+  params: B2BParams,
+): Promise<B2BResponse> {
+  const { initiatorName, securityCredential: credential } = requirePayoutCredentials(config, 'B2B')
+  const amount = toDarajaAmount(params.amount)
+  const receiver = assertShortCode(params.receiverShortCode, 'receiverShortCode')
+  const commandId = params.commandId ?? 'BusinessPayBill'
+
+  if (commandId === 'BusinessPayBill' && !params.accountReference?.trim()) {
+    throw new Error('BusinessPayBill requires an accountReference — the account number on the receiving paybill')
+  }
+
+  const token = await getAccessToken(config, store)
+
+  const payload: Record<string, string | number> = {
+    Initiator: initiatorName,
+    SecurityCredential: credential,
+    CommandID: commandId,
+    SenderIdentifierType: params.senderIdentifierType ?? '4',
+    RecieverIdentifierType: params.receiverIdentifierType ?? '4',
+    Amount: amount,
+    PartyA: config.shortCode,
+    PartyB: receiver,
+    AccountReference: (params.accountReference ?? '').slice(0, 20),
+    Remarks: params.remarks.slice(0, 100),
+    QueueTimeOutURL: callbackUrl(config, 'b2bTimeout'),
+    ResultURL: callbackUrl(config, 'b2bResult'),
+  }
+
+  if (params.requesterPhoneNumber) {
+    payload['Requester'] = normalisePhone(params.requesterPhoneNumber)
+  }
+
+  const res = await fetchWithTimeout(
+    `${baseUrl(config.environment)}/mpesa/b2b/v1/paymentrequest`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    },
+    timeout(config),
+  )
+
+  const body = await readJson<B2BResponse>(res)
+  if (!res.ok || body.ResponseCode !== '0' || !body.ConversationID) {
+    throw darajaError('B2B request', res.status, body)
+  }
+
+  return body as B2BResponse
 }

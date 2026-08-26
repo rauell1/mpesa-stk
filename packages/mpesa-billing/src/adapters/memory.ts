@@ -47,7 +47,19 @@ export class MemoryStore implements BillingStore {
     // Unknown, or already terminal — the duplicate-delivery case.
     if (!stored || stored.status !== 'PENDING') return null
 
-    const settled: BillingPayment = { ...stored, ...updates, settledAt: new Date() }
+    // Spread `updates` field by field: `settledAmount: undefined` from an
+    // object spread would erase a value the Postgres adapter's COALESCE keeps.
+    const settled: BillingPayment = {
+      ...stored,
+      status: updates.status,
+      settledAt: new Date(),
+      ...(updates.receipt !== undefined ? { receipt: updates.receipt } : {}),
+      ...(updates.payerRef !== undefined ? { payerRef: updates.payerRef } : {}),
+      ...(updates.settledAmount !== undefined ? { settledAmount: updates.settledAmount } : {}),
+      ...(updates.failureCode !== undefined ? { failureCode: updates.failureCode } : {}),
+      ...(updates.failureReason !== undefined ? { failureReason: updates.failureReason } : {}),
+      ...(updates.raw !== undefined ? { raw: updates.raw } : {}),
+    }
     this.payments.set(key(rail, providerRef), settled)
 
     // No transaction to roll back to, so restore the previous state by hand:
@@ -71,7 +83,11 @@ export class MemoryStore implements BillingStore {
     const id = key(payment.rail, payment.providerRef)
     if (this.payments.has(id)) return null
 
-    const stored = { ...payment, settledAt: payment.settledAt ?? new Date() }
+    const stored: BillingPayment = {
+      ...payment,
+      settledAmount: payment.settledAmount ?? payment.amount,
+      settledAt: payment.settledAt ?? new Date(),
+    }
     this.payments.set(id, stored)
 
     if (apply) {

@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
-  parseB2CResult,
-  parseB2CTimeout,
   parseC2B,
+  parsePayoutResult,
+  parsePayoutTimeout,
   parseStkCallback,
 } from '../src/callbacks.js'
+import { fromMajor } from '../src/money.js'
 
 // Shapes taken from what Daraja actually sends, including the ones the docs
 // do not mention: no CallbackMetadata on failure, a masked phone number, and
@@ -37,7 +38,7 @@ describe('parseStkCallback', () => {
       resultCode: 0,
       receipt: 'NLJ7RT61SV',
       phoneNumber: '254708374149',
-      amount: '1',
+      amount: fromMajor('1', 'KES'),
     })
   })
 
@@ -80,7 +81,8 @@ describe('parseStkCallback', () => {
     ['an empty object', {}],
     ['a body with no stkCallback', { Body: {} }],
     ['a callback with no CheckoutRequestID', { Body: { stkCallback: { ResultCode: 0 } } }],
-    ['a callback with a non-numeric ResultCode', { Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: '0' } } }],
+    ['a callback with an unparseable ResultCode', { Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 'OK' } } }],
+    ['a callback with no ResultCode at all', { Body: { stkCallback: { CheckoutRequestID: 'x' } } }],
   ])('returns null for %s rather than throwing', (_label, payload) => {
     expect(parseStkCallback(payload)).toBeNull()
   })
@@ -101,14 +103,27 @@ describe('parseC2B', () => {
     expect(parsed).toEqual({
       transId: 'RKTQDM7W6S',
       reference: 'ORDER-42',
-      amount: '500.00',
+      amount: fromMajor('500.00', 'KES'),
       msisdn: '254708374149',
       payerName: 'John K Doe',
     })
   })
 
   it('accepts a numeric TransAmount without turning it into a float', () => {
-    expect(parseC2B({ TransID: 'T1', TransAmount: 500, BillRefNumber: 'R', MSISDN: '254700000000' })?.amount).toBe('500')
+    expect(
+      parseC2B({ TransID: 'T1', TransAmount: 500, BillRefNumber: 'R', MSISDN: '254700000000' })?.amount,
+    ).toEqual({ currency: 'KES', minor: 50000 })
+  })
+
+  it('reads a string ResultCode, which is what the C2B rails send', () => {
+    const parsed = parseStkCallback({
+      Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: '0', ResultDesc: 'ok' } },
+    })
+    expect(parsed).toMatchObject({ succeeded: true, resultCode: 0 })
+  })
+
+  it('returns null when TransAmount cannot be read as money — there is no prior row to fall back on', () => {
+    expect(parseC2B({ TransID: 'T1', TransAmount: 'many', BillRefNumber: 'R', MSISDN: 'x' })).toBeNull()
   })
 
   it.each([
@@ -120,9 +135,9 @@ describe('parseC2B', () => {
   })
 })
 
-describe('parseB2CResult', () => {
+describe('parsePayoutResult', () => {
   it('reads a successful payout', () => {
-    const parsed = parseB2CResult({
+    const parsed = parsePayoutResult({
       Result: {
         ResultCode: 0,
         ResultDesc: 'The service request is processed successfully.',
@@ -135,7 +150,7 @@ describe('parseB2CResult', () => {
   })
 
   it('reads a failure and keeps the code Daraja gave', () => {
-    const parsed = parseB2CResult({
+    const parsed = parsePayoutResult({
       Result: { ResultCode: 2001, ResultDesc: 'The initiator information is invalid.', ConversationID: 'AG_1' },
     })
 
@@ -143,20 +158,20 @@ describe('parseB2CResult', () => {
   })
 
   it('returns null when there is no ConversationID to key on', () => {
-    expect(parseB2CResult({ Result: { ResultCode: 0 } })).toBeNull()
+    expect(parsePayoutResult({ Result: { ResultCode: 0 } })).toBeNull()
   })
 })
 
-describe('parseB2CTimeout', () => {
+describe('parsePayoutTimeout', () => {
   it('reads the flat shape', () => {
-    expect(parseB2CTimeout({ ConversationID: 'AG_1' })).toEqual({ conversationId: 'AG_1' })
+    expect(parsePayoutTimeout({ ConversationID: 'AG_1' })).toEqual({ conversationId: 'AG_1' })
   })
 
   it('reads the wrapped shape', () => {
-    expect(parseB2CTimeout({ Result: { ConversationID: 'AG_2' } })).toEqual({ conversationId: 'AG_2' })
+    expect(parsePayoutTimeout({ Result: { ConversationID: 'AG_2' } })).toEqual({ conversationId: 'AG_2' })
   })
 
   it('returns null when neither is present', () => {
-    expect(parseB2CTimeout({ Result: {} })).toBeNull()
+    expect(parsePayoutTimeout({ Result: {} })).toBeNull()
   })
 })

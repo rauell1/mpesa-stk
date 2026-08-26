@@ -1,3 +1,4 @@
+import type { Money } from '../money.js'
 import type { BillingPayment, MpesaEnvironment, PaymentStatus, Rail } from '../types.js'
 
 /**
@@ -8,6 +9,12 @@ export interface SettleUpdates {
   status: Exclude<PaymentStatus, 'PENDING'>
   receipt?: string
   payerRef?: string
+  /**
+   * What the provider says actually moved. Recorded alongside the requested
+   * amount rather than overwriting it: the two differing is a real event worth
+   * being able to see, not a correction to apply silently.
+   */
+  settledAmount?: Money
   failureCode?: string
   failureReason?: string
   raw?: unknown
