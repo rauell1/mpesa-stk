@@ -1,5 +1,5 @@
 /**
- * The facade: four rails, one settlement contract.
+ * The facade: five rails, one settlement contract.
  *
  * Every webhook handler here returns a `WebhookResult` — a framework-agnostic
  * `{ status, body }` plus the record this delivery settled, if any. Your
@@ -9,16 +9,30 @@
 
 import { randomUUID } from 'node:crypto'
 import {
-  parseB2CResult,
-  parseB2CTimeout,
   parseC2B,
   parseJson,
+  parsePayoutResult,
+  parsePayoutTimeout,
   parseStkCallback,
   type ParsedC2B,
 } from './callbacks.js'
-import { b2cPaymentRequest, registerC2BUrls, stkPush, type B2CCommand, type B2CResponse, type RegisterUrlResponse } from './daraja.js'
+import { isIpAllowed } from './config.js'
+import {
+  b2bPaymentRequest,
+  b2cPaymentRequest,
+  registerC2BUrls,
+  stkPush,
+  type B2BCommand,
+  type B2BIdentifierType,
+  type B2BResponse,
+  type B2CCommand,
+  type B2CResponse,
+  type RegisterUrlResponse,
+} from './daraja.js'
+import { MPESA_CURRENCY, toMoney, type Money, type MoneyInput } from './money.js'
 import {
   createCheckoutSession,
+  sessionAmount,
   sessionPaymentIntentId,
   sessionReference,
   verifyStripeSignature,
@@ -30,14 +44,32 @@ import type {
   BillingPayment,
   DarajaConfig,
   Logger,
+  Rail,
   StripeConfig,
+  WebhookContext,
   WebhookReply,
   WebhookResult,
 } from './types.js'
 
-/** M-PESA replies are always 200 — see the note on `acknowledged` below. */
+/** M-PESA replies are always 200 — see the note on the inbound section below. */
 const MPESA_OK: WebhookReply = { status: 200, body: { ResultCode: '0', ResultDesc: 'Success' } }
 const MPESA_ACK: WebhookReply = { status: 200, body: { ResultCode: '0', ResultDesc: 'Acknowledged' } }
+
+/**
+ * A delivery from an IP we do not trust. Still a 200: telling an attacker
+ * which of their forgeries was rejected, and why, is free information, and a
+ * non-200 to a genuine Safaricom retry helps nobody.
+ */
+const MPESA_REJECTED: WebhookReply = {
+  status: 200,
+  body: { ResultCode: '0', ResultDesc: 'Acknowledged' },
+}
+
+const NO_RESULT = (reply: WebhookReply): WebhookResult => ({
+  reply,
+  settled: null,
+  duplicate: false,
+})
 
 export type SettledHandler = (payment: BillingPayment) => void | Promise<void>
 
@@ -60,6 +92,21 @@ export interface BillingOptions {
    * recording payments you cannot attribute.
    */
   validateC2BReference?: (reference: string, payload: ParsedC2B) => boolean | Promise<boolean>
+  /**
+   * Only accept M-PESA deliveries from these CIDR blocks.
+   *
+   * Safaricom signs nothing, so an unprotected C2B confirmation endpoint lets
+   * anyone who knows the URL POST a payment that never happened — and unlike
+   * the other rails, that one creates a settled row from scratch. Set this to
+   * `SAFARICOM_CALLBACK_CIDRS` and give the handlers a `sourceIp`, or enforce
+   * the same list at your WAF.
+   *
+   * Left unset, no check is made: the handlers cannot tell a missing
+   * `sourceIp` from a spoofed one, and silently rejecting every delivery
+   * behind a proxy that does not forward the IP would be worse than the gap it
+   * closes.
+   */
+  trustedMpesaIps?: readonly string[]
   /** Defaults to crypto.randomUUID. */
   generateId?: () => string
 }
@@ -71,6 +118,7 @@ export class Billing {
   private readonly logger: Logger | undefined
   private readonly applyOnSettle: ApplyInTransaction | undefined
   private readonly validateC2BReference: BillingOptions['validateC2BReference']
+  private readonly trustedMpesaIps: readonly string[] | undefined
   private readonly generateId: () => string
   private readonly settledHandlers: SettledHandler[] = []
 
@@ -81,6 +129,7 @@ export class Billing {
     this.logger = options.logger
     this.applyOnSettle = options.applyOnSettle
     this.validateC2BReference = options.validateC2BReference
+    this.trustedMpesaIps = options.trustedMpesaIps
     this.generateId = options.generateId ?? (() => randomUUID())
   }
 
@@ -109,17 +158,21 @@ export class Billing {
   async initiateStkPush(params: {
     reference: string
     phoneNumber: string
-    amount: number
+    /** KES. `{ amount: 500, currency: 'KES' }` or `{ minor: 50000, currency: 'KES' }`. */
+    amount: MoneyInput
     accountReference?: string
     description?: string
+    transactionType?: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline'
   }): Promise<{ payment: BillingPayment; customerMessage: string }> {
     const config = this.requireMpesa()
+    const amount = toMoney(params.amount)
 
     const response = await stkPush(config, this.store, {
       phoneNumber: params.phoneNumber,
-      amount: params.amount,
+      amount,
       accountReference: params.accountReference ?? params.reference,
       description: params.description ?? 'Payment',
+      ...(params.transactionType ? { transactionType: params.transactionType } : {}),
     })
 
     const payment = await this.store.createPayment({
@@ -127,8 +180,7 @@ export class Billing {
       rail: 'stk',
       reference: params.reference,
       providerRef: response.CheckoutRequestID,
-      amount: String(params.amount),
-      currency: 'kes',
+      amount,
       status: 'PENDING',
       payerRef: params.phoneNumber,
       createdAt: new Date(),
@@ -148,49 +200,114 @@ export class Billing {
     return registerC2BUrls(this.requireMpesa(), this.store, responseType)
   }
 
-  /** Send a payout. The outcome arrives later on the result or timeout URL. */
+  /** Pay out to a customer's phone. The outcome arrives on the result or timeout URL. */
   async initiateB2C(params: {
     reference: string
     phoneNumber: string
-    amount: number
+    amount: MoneyInput
     remarks: string
     occasion?: string
     commandId?: B2CCommand
   }): Promise<{ payment: BillingPayment; response: B2CResponse }> {
     const config = this.requireMpesa()
+    const amount = toMoney(params.amount)
 
-    const request: Parameters<typeof b2cPaymentRequest>[2] = {
+    const response = await b2cPaymentRequest(config, this.store, {
       phoneNumber: params.phoneNumber,
-      amount: params.amount,
+      amount,
       remarks: params.remarks,
-    }
-    if (params.occasion !== undefined) request.occasion = params.occasion
-    if (params.commandId !== undefined) request.commandId = params.commandId
-
-    const response = await b2cPaymentRequest(config, this.store, request)
-
-    const payment = await this.store.createPayment({
-      id: this.generateId(),
-      rail: 'b2c',
-      reference: params.reference,
-      providerRef: response.ConversationID,
-      amount: String(params.amount),
-      currency: 'kes',
-      status: 'PENDING',
-      payerRef: params.phoneNumber,
-      createdAt: new Date(),
+      ...(params.occasion !== undefined ? { occasion: params.occasion } : {}),
+      ...(params.commandId !== undefined ? { commandId: params.commandId } : {}),
     })
 
-    if (!payment) throw new Error(`ConversationID ${response.ConversationID} is already recorded`)
-
+    const payment = await this.recordPayout('b2c', params.reference, response, amount, params.phoneNumber)
     return { payment, response }
   }
 
-  /** Open a Stripe Checkout session and record a PENDING payment against it. */
+  /**
+   * Pay another business — their paybill or till. The outcome arrives on the
+   * B2B result or timeout URL.
+   *
+   * `BusinessPayBill` (the default) needs an `accountReference`: it is the
+   * account number the receiving organisation will see on their statement, and
+   * Daraja rejects the request without it.
+   */
+  async initiateB2B(params: {
+    reference: string
+    receiverShortCode: string
+    amount: MoneyInput
+    remarks: string
+    accountReference?: string
+    commandId?: B2BCommand
+    senderIdentifierType?: B2BIdentifierType
+    receiverIdentifierType?: B2BIdentifierType
+    requesterPhoneNumber?: string
+  }): Promise<{ payment: BillingPayment; response: B2BResponse }> {
+    const config = this.requireMpesa()
+    const amount = toMoney(params.amount)
+
+    const response = await b2bPaymentRequest(config, this.store, {
+      receiverShortCode: params.receiverShortCode,
+      amount,
+      remarks: params.remarks,
+      ...(params.accountReference !== undefined ? { accountReference: params.accountReference } : {}),
+      ...(params.commandId !== undefined ? { commandId: params.commandId } : {}),
+      ...(params.senderIdentifierType !== undefined
+        ? { senderIdentifierType: params.senderIdentifierType }
+        : {}),
+      ...(params.receiverIdentifierType !== undefined
+        ? { receiverIdentifierType: params.receiverIdentifierType }
+        : {}),
+      ...(params.requesterPhoneNumber !== undefined
+        ? { requesterPhoneNumber: params.requesterPhoneNumber }
+        : {}),
+    })
+
+    const payment = await this.recordPayout(
+      'b2b',
+      params.reference,
+      response,
+      amount,
+      params.receiverShortCode,
+    )
+    return { payment, response }
+  }
+
+  /** Both payout rails record the same way, keyed on the ConversationID. */
+  private async recordPayout(
+    rail: 'b2c' | 'b2b',
+    reference: string,
+    response: { ConversationID: string },
+    amount: Money,
+    payeeRef: string,
+  ): Promise<BillingPayment> {
+    const payment = await this.store.createPayment({
+      id: this.generateId(),
+      rail,
+      reference,
+      providerRef: response.ConversationID,
+      amount,
+      status: 'PENDING',
+      payerRef: payeeRef,
+      createdAt: new Date(),
+    })
+
+    if (!payment) {
+      throw new Error(`ConversationID ${response.ConversationID} is already recorded`)
+    }
+    return payment
+  }
+
+  /**
+   * Open a Stripe Checkout session and record a PENDING payment against it.
+   *
+   * The amount is a `Money` like every other rail — `{ amount: '5.00',
+   * currency: 'USD' }`, not a bare count of cents. It is converted to Stripe's
+   * `unit_amount` at the boundary.
+   */
   async createStripeCheckout(params: {
     reference: string
-    amount: number
-    currency?: string
+    amount: MoneyInput
     successUrl: string
     cancelUrl: string
     productName?: string
@@ -198,27 +315,24 @@ export class Billing {
     metadata?: Record<string, string>
   }): Promise<{ payment: BillingPayment; session: CheckoutSession }> {
     const config = this.requireStripe()
+    const amount = toMoney(params.amount)
 
-    const sessionParams: Parameters<typeof createCheckoutSession>[1] = {
+    const session = await createCheckoutSession(config, {
       reference: params.reference,
-      amount: params.amount,
+      amount,
       successUrl: params.successUrl,
       cancelUrl: params.cancelUrl,
-    }
-    if (params.currency !== undefined) sessionParams.currency = params.currency
-    if (params.productName !== undefined) sessionParams.productName = params.productName
-    if (params.idempotencyKey !== undefined) sessionParams.idempotencyKey = params.idempotencyKey
-    if (params.metadata !== undefined) sessionParams.metadata = params.metadata
-
-    const session = await createCheckoutSession(config, sessionParams)
+      ...(params.productName !== undefined ? { productName: params.productName } : {}),
+      ...(params.idempotencyKey !== undefined ? { idempotencyKey: params.idempotencyKey } : {}),
+      ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
+    })
 
     const created = await this.store.createPayment({
       id: this.generateId(),
       rail: 'stripe',
       reference: params.reference,
       providerRef: session.id,
-      amount: String(params.amount),
-      currency: (params.currency ?? 'usd').toLowerCase(),
+      amount,
       status: 'PENDING',
       createdAt: new Date(),
     })
@@ -240,13 +354,26 @@ export class Billing {
   // taken. Recovery is reconciliation, not the retry.
   // -------------------------------------------------------------------------
 
-  async handleStkCallback(rawBody: string): Promise<WebhookResult> {
+  /** False when `trustedMpesaIps` is set and this delivery is not from one. */
+  private isTrusted(context: WebhookContext | undefined, handler: string): boolean {
+    if (!this.trustedMpesaIps) return true
+    if (isIpAllowed(context?.sourceIp, this.trustedMpesaIps)) return true
+    this.logger?.warn('[billing] rejected an M-PESA delivery from an untrusted source', {
+      handler,
+      sourceIp: context?.sourceIp ?? '(none supplied)',
+    })
+    return false
+  }
+
+  async handleStkCallback(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    if (!this.isTrusted(context, 'stkCallback')) return NO_RESULT(MPESA_REJECTED)
+
     try {
       const body = parseJson(rawBody)
       const parsed = parseStkCallback(body)
       if (!parsed) {
         this.logger?.warn('[billing] STK callback could not be parsed')
-        return { reply: MPESA_ACK, settled: null, duplicate: false }
+        return NO_RESULT(MPESA_ACK)
       }
 
       const settled = await this.store.settlePayment(
@@ -257,6 +384,7 @@ export class Billing {
               status: 'SUCCESS',
               ...(parsed.receipt ? { receipt: parsed.receipt } : {}),
               ...(parsed.phoneNumber ? { payerRef: parsed.phoneNumber } : {}),
+              ...(parsed.amount ? { settledAmount: parsed.amount } : {}),
               raw: body,
             }
           : {
@@ -272,7 +400,7 @@ export class Billing {
       return { reply: MPESA_OK, settled, duplicate: settled === null }
     } catch (error) {
       this.logger?.error('[billing] STK callback failed', { error })
-      return { reply: MPESA_ACK, settled: null, duplicate: false }
+      return NO_RESULT(MPESA_ACK)
     }
   }
 
@@ -285,50 +413,26 @@ export class Billing {
    * the payment, and an unattributable payment costs more to unwind than a
    * declined one costs to retry.
    */
-  async handleC2BValidation(rawBody: string): Promise<WebhookResult> {
+  async handleC2BValidation(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    const decline = (code: string, desc: string): WebhookResult =>
+      NO_RESULT({ status: 200, body: { ResultCode: code, ResultDesc: desc } })
+
+    if (!this.isTrusted(context, 'c2bValidation')) return decline('C2B00016', 'Unable to validate.')
+
     try {
       const parsed = parseC2B(parseJson(rawBody))
-      if (!parsed) {
-        return {
-          reply: {
-            status: 200,
-            body: { ResultCode: 'C2B00012', ResultDesc: 'Invalid account number.' },
-          },
-          settled: null,
-          duplicate: false,
-        }
-      }
+      if (!parsed) return decline('C2B00012', 'Invalid account number.')
 
       const accepted = this.validateC2BReference
         ? await this.validateC2BReference(parsed.reference, parsed)
         : parsed.reference.length > 0
 
-      if (!accepted) {
-        return {
-          reply: {
-            status: 200,
-            body: { ResultCode: 'C2B00012', ResultDesc: 'Account not found.' },
-          },
-          settled: null,
-          duplicate: false,
-        }
-      }
+      if (!accepted) return decline('C2B00012', 'Account not found.')
 
-      return {
-        reply: { status: 200, body: { ResultCode: '0', ResultDesc: 'Accepted' } },
-        settled: null,
-        duplicate: false,
-      }
+      return NO_RESULT({ status: 200, body: { ResultCode: '0', ResultDesc: 'Accepted' } })
     } catch (error) {
       this.logger?.error('[billing] C2B validation failed', { error })
-      return {
-        reply: {
-          status: 200,
-          body: { ResultCode: 'C2B00016', ResultDesc: 'Unable to validate. Please try again.' },
-        },
-        settled: null,
-        duplicate: false,
-      }
+      return decline('C2B00016', 'Unable to validate. Please try again.')
     }
   }
 
@@ -336,14 +440,19 @@ export class Billing {
    * The money has moved. There is no PENDING row to settle — C2B starts at the
    * customer's phone — so the insert itself is the guard: the UNIQUE
    * constraint on Safaricom's TransID makes a replayed confirmation a no-op.
+   *
+   * This is the one handler that creates a settled payment from nothing, which
+   * is why `trustedMpesaIps` matters most here.
    */
-  async handleC2BConfirmation(rawBody: string): Promise<WebhookResult> {
+  async handleC2BConfirmation(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    if (!this.isTrusted(context, 'c2bConfirmation')) return NO_RESULT(MPESA_REJECTED)
+
     try {
       const body = parseJson(rawBody)
       const parsed = parseC2B(body)
       if (!parsed) {
         this.logger?.warn('[billing] C2B confirmation could not be parsed')
-        return { reply: MPESA_ACK, settled: null, duplicate: false }
+        return NO_RESULT(MPESA_ACK)
       }
 
       const now = new Date()
@@ -354,7 +463,7 @@ export class Billing {
           reference: parsed.reference,
           providerRef: parsed.transId,
           amount: parsed.amount,
-          currency: 'kes',
+          settledAmount: parsed.amount,
           status: 'SUCCESS',
           payerRef: parsed.msisdn,
           receipt: parsed.transId,
@@ -369,24 +478,58 @@ export class Billing {
       return { reply: MPESA_OK, settled: recorded, duplicate: recorded === null }
     } catch (error) {
       this.logger?.error('[billing] C2B confirmation failed', { error })
-      return { reply: MPESA_ACK, settled: null, duplicate: false }
+      return NO_RESULT(MPESA_ACK)
     }
   }
 
-  async handleB2CResult(rawBody: string): Promise<WebhookResult> {
+  async handleB2CResult(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    return this.handlePayoutResult('b2c', rawBody, context)
+  }
+
+  async handleB2BResult(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    return this.handlePayoutResult('b2b', rawBody, context)
+  }
+
+  async handleB2CTimeout(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    return this.handlePayoutTimeout('b2c', rawBody, context)
+  }
+
+  async handleB2BTimeout(rawBody: string, context?: WebhookContext): Promise<WebhookResult> {
+    return this.handlePayoutTimeout('b2b', rawBody, context)
+  }
+
+  /**
+   * B2C and B2B share the `Result` envelope, so they share this handler.
+   *
+   * The receipt and the amount that actually moved come from
+   * `ResultParameters`; a payout recorded without them is a payout you cannot
+   * reconcile against the statement.
+   */
+  private async handlePayoutResult(
+    rail: 'b2c' | 'b2b',
+    rawBody: string,
+    context: WebhookContext | undefined,
+  ): Promise<WebhookResult> {
+    if (!this.isTrusted(context, `${rail}Result`)) return NO_RESULT(MPESA_REJECTED)
+
     try {
       const body = parseJson(rawBody)
-      const parsed = parseB2CResult(body)
+      const parsed = parsePayoutResult(body)
       if (!parsed) {
-        this.logger?.warn('[billing] B2C result could not be parsed')
-        return { reply: MPESA_ACK, settled: null, duplicate: false }
+        this.logger?.warn(`[billing] ${rail.toUpperCase()} result could not be parsed`)
+        return NO_RESULT(MPESA_ACK)
       }
 
       const settled = await this.store.settlePayment(
-        'b2c',
+        rail,
         parsed.conversationId,
         parsed.succeeded
-          ? { status: 'SUCCESS', ...(parsed.receipt ? { receipt: parsed.receipt } : {}), raw: body }
+          ? {
+              status: 'SUCCESS',
+              ...(parsed.receipt ? { receipt: parsed.receipt } : {}),
+              ...(parsed.amount ? { settledAmount: parsed.amount } : {}),
+              raw: body,
+            }
           : {
               status: 'FAILED',
               failureCode: String(parsed.resultCode),
@@ -399,27 +542,34 @@ export class Billing {
       await this.emitSettled(settled)
       return { reply: MPESA_ACK, settled, duplicate: settled === null }
     } catch (error) {
-      this.logger?.error('[billing] B2C result failed', { error })
-      return { reply: MPESA_ACK, settled: null, duplicate: false }
+      this.logger?.error(`[billing] ${rail.toUpperCase()} result failed`, { error })
+      return NO_RESULT(MPESA_ACK)
     }
   }
 
   /**
    * The payout expired in Safaricom's queue. That is not the same as "the
-   * money did not move" — it is marked failed here, and only a status query
-   * against Daraja can confirm it.
+   * money did not move" — it is marked failed here, and only a transaction
+   * status query against Daraja can confirm it either way. The CAS means a
+   * result that already settled the payout wins over a late timeout.
    */
-  async handleB2CTimeout(rawBody: string): Promise<WebhookResult> {
+  private async handlePayoutTimeout(
+    rail: 'b2c' | 'b2b',
+    rawBody: string,
+    context: WebhookContext | undefined,
+  ): Promise<WebhookResult> {
+    if (!this.isTrusted(context, `${rail}Timeout`)) return NO_RESULT(MPESA_REJECTED)
+
     try {
       const body = parseJson(rawBody)
-      const parsed = parseB2CTimeout(body)
+      const parsed = parsePayoutTimeout(body)
       if (!parsed) {
-        this.logger?.warn('[billing] B2C timeout could not be parsed')
-        return { reply: MPESA_ACK, settled: null, duplicate: false }
+        this.logger?.warn(`[billing] ${rail.toUpperCase()} timeout could not be parsed`)
+        return NO_RESULT(MPESA_ACK)
       }
 
       const settled = await this.store.settlePayment(
-        'b2c',
+        rail,
         parsed.conversationId,
         {
           status: 'FAILED',
@@ -433,8 +583,8 @@ export class Billing {
       await this.emitSettled(settled)
       return { reply: MPESA_ACK, settled, duplicate: settled === null }
     } catch (error) {
-      this.logger?.error('[billing] B2C timeout failed', { error })
-      return { reply: MPESA_ACK, settled: null, duplicate: false }
+      this.logger?.error(`[billing] ${rail.toUpperCase()} timeout failed`, { error })
+      return NO_RESULT(MPESA_ACK)
     }
   }
 
@@ -447,22 +597,26 @@ export class Billing {
   // -------------------------------------------------------------------------
 
   async handleStripeWebhook(rawBody: string, signatureHeader: string | null): Promise<WebhookResult> {
-    const config = this.requireStripe()
+    let config: StripeConfig
+    try {
+      config = this.requireStripe()
+    } catch (error) {
+      // Misconfiguration, not a bad delivery. 500 so Stripe retries once the
+      // config is fixed, rather than 400 discarding a real payment.
+      this.logger?.error('[billing] Stripe webhook received with no stripe config', { error })
+      return NO_RESULT({ status: 500, body: { error: 'Stripe is not configured' } })
+    }
 
     if (!verifyStripeSignature(rawBody, signatureHeader, config.webhookSecret, config.toleranceSeconds)) {
       // Without this check, anyone who knows the URL can POST a completed
       // session and pay for nothing.
       this.logger?.warn('[billing] Stripe signature verification failed')
-      return {
-        reply: { status: 400, body: { error: 'Invalid signature' } },
-        settled: null,
-        duplicate: false,
-      }
+      return NO_RESULT({ status: 400, body: { error: 'Invalid signature' } })
     }
 
     const event = parseJson(rawBody) as StripeEvent | null
     if (!event?.type || !event.data?.object) {
-      return { reply: { status: 200, body: { received: true } }, settled: null, duplicate: false }
+      return NO_RESULT({ status: 200, body: { received: true } })
     }
 
     try {
@@ -499,7 +653,7 @@ export class Billing {
       }
     } catch (error) {
       this.logger?.error('[billing] Stripe webhook failed', { type: event.type, error })
-      return { reply: { status: 500, body: { error: 'Processing failed' } }, settled: null, duplicate: false }
+      return NO_RESULT({ status: 500, body: { error: 'Processing failed' } })
     }
   }
 
@@ -514,6 +668,9 @@ export class Billing {
     }
 
     const intentId = sessionPaymentIntentId(session)
+    // amount_total is in minor units and currency is lowercase; sessionAmount
+    // turns that back into the same Money the checkout was created with.
+    const paid = status === 'SUCCESS' ? sessionAmount(session) : undefined
 
     return this.store.settlePayment(
       'stripe',
@@ -521,11 +678,24 @@ export class Billing {
       {
         status,
         ...(intentId ? { receipt: intentId } : {}),
+        ...(paid ? { settledAmount: paid } : {}),
         ...(status === 'FAILED' ? { failureCode: event.type } : {}),
         raw: event,
       },
       this.applyOnSettle,
     )
+  }
+
+  // -------------------------------------------------------------------------
+  // Reads
+  // -------------------------------------------------------------------------
+
+  getPayment(rail: Rail, providerRef: string): Promise<BillingPayment | null> {
+    return this.store.getPayment(rail, providerRef)
+  }
+
+  getPaymentByReference(rail: Rail, reference: string): Promise<BillingPayment | null> {
+    return this.store.getPaymentByReference(rail, reference)
   }
 
   // -------------------------------------------------------------------------
@@ -553,3 +723,5 @@ export class Billing {
     return this.stripeConfig
   }
 }
+
+export { MPESA_CURRENCY }

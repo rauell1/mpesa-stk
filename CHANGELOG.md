@@ -1,5 +1,88 @@
 # Changelog
 
+## Unreleased
+
+Repository refocused on being a general-purpose M-PESA SDK: the application-specific
+example is gone, `mpesa-billing` gains the B2B rail, and every amount now carries its
+currency.
+
+### `mpesa-billing`
+
+#### Added
+
+- **B2B rail.** `initiateB2B` pays another business's paybill or till, with
+  `handleB2BResult` / `handleB2BTimeout` settling through the same
+  compare-and-swap as every other rail. Supports `BusinessPayBill`,
+  `BusinessBuyGoods`, `DisburseFundsToBusiness`, and
+  `BusinessToBusinessTransfer`. Three B2B-specific wire-format traps are handled:
+  the operator field is `Initiator` (not `InitiatorName`), `PartyB` is a shortcode
+  and must not be phone-normalised, and Safaricom's field is spelled
+  `RecieverIdentifierType`.
+- **`Money`** — every amount is now `{ currency, minor }`: an ISO-4217 code and an
+  integer count of minor units. Decimal strings are parsed digit by digit (no
+  `19.99 * 100` drift), zero- and three-decimal currencies are handled, and excess
+  precision throws instead of being truncated.
+- **`settledAmount`** on every payment: what the provider says actually moved, kept
+  alongside the requested `amount`. On C2B, where the customer types the amount,
+  these routinely differ.
+- **`trustedMpesaIps`** plus `SAFARICOM_CALLBACK_CIDRS` and `isIpAllowed`. Safaricom
+  signs nothing, so the published callback ranges stand in for a signature. Opt-in.
+- `getPayment` / `getPaymentByReference` on the `Billing` facade.
+- `transactionType` on `initiateStkPush`, for till (`CustomerBuyGoodsOnline`) as well
+  as paybill payments.
+
+#### Fixed
+
+- **Payout results dropped the receipt and the amount.** `parseB2CResult` read only
+  `Result.TransactionID` and never touched `ResultParameters`, where Daraja actually
+  puts `TransactionReceipt`, `TransactionAmount`, and `ReceiverPartyPublicName`. Now
+  parsed, including the single-object shape Safaricom sends when there is one
+  parameter. Renamed to `parsePayoutResult` (B2C and B2B share the envelope);
+  `parseB2CResult` remains as an alias.
+- **A security certificate supplied through an environment variable failed.**
+  `env.example` documents `MPESA_SECURITY_CERTIFICATE` with `\n` escapes, but only
+  dotenv expands those — Docker, Kubernetes, Vercel, and GitHub Actions hand over the
+  literal characters, and OpenSSL then rejected the PEM with
+  `error:1E08010C:DECODER routines::unsupported`. `normalisePem` repairs either form,
+  and `darajaConfigFromEnv` applies it at boot so a bad certificate fails at startup
+  rather than on the first payout.
+- **A Stripe webhook arriving with no Stripe config returned an unhandled throw.** Now
+  a 500, so Stripe retries once the configuration is fixed rather than the delivery
+  being lost.
+- `MPESA_TIMEOUT_MS` and the Stripe timeouts silently became `NaN` when unparseable;
+  they are now validated. `MPESA_SHORTCODE` is checked to be a shortcode.
+- STK `ResultCode` arriving as a numeric string is now accepted rather than dropping
+  the callback; a C2B `TransAmount` that cannot be read as money now rejects the
+  delivery rather than recording a payment of nothing.
+
+#### Changed
+
+- **Breaking:** `BillingPayment.amount` is a `Money`, not a string, and the separate
+  `currency` field is gone. Rail APIs take `{ amount, currency }` or
+  `{ minor, currency }`; a bare number is refused.
+- **Breaking:** the Postgres schema stores `amount_minor BIGINT` + `currency CHAR(3)`
+  in place of `amount NUMERIC(14,2)`, with `settled_amount_minor` / `settled_currency`
+  alongside and a constraint that neither exists without the other. `migrate()` adds
+  the new columns to an existing table.
+- Webhook handlers take an optional `WebhookContext` second argument; `createWebhookRoutes`
+  fills it from a configurable header.
+- `assertWholeAmount` is replaced by `toDarajaAmount`, which also enforces KES.
+
+#### Tests
+
+- 71 → 215. New suites for `Money`, B2B settlement and its wire format, the whole
+  outbound Daraja layer (previously untested), the Postgres adapter (previously
+  untested), and caller verification.
+
+### Repository
+
+- **Removed the SafariCharge example** — its multi-tenant plan tiers, organization
+  tables, and RLS migration were specific to one application. Replaced by
+  `examples/billing-node/`, which shows the same wiring with no domain attached.
+- Bumped `hono` and `@hono/node-server`, which the relay depends on at runtime, past
+  their advisories.
+- `repository`, `bugs`, and `homepage` now point at this repository.
+
 ## [0.3.1] — 2026-06-21
 
 Docs only — no code change.

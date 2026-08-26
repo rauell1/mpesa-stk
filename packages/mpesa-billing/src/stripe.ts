@@ -9,6 +9,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { fetchWithTimeout } from './config.js'
+import { fromMinor, toMajorString, toStripeUnitAmount, type Money } from './money.js'
 import type { StripeConfig } from './types.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -17,9 +18,12 @@ const DEFAULT_TOLERANCE_SECONDS = 300
 export interface CheckoutSessionParams {
   /** Your identifier for what is being paid for; echoed back on the webhook. */
   reference: string
-  /** Smallest currency unit — cents for USD, as Stripe expects. */
-  amount: number
-  currency?: string
+  /**
+   * What to charge, currency attached. Converted to Stripe's `unit_amount`
+   * here, so the caller never has to remember whether this rail counts cents
+   * or dollars.
+   */
+  amount: Money
   productName?: string
   successUrl: string
   cancelUrl: string
@@ -38,20 +42,15 @@ export async function createCheckoutSession(
   config: StripeConfig,
   params: CheckoutSessionParams,
 ): Promise<CheckoutSession> {
-  const amount = Math.trunc(params.amount)
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error(
-      `amount must be a positive integer in the smallest currency unit, got ${String(params.amount)}`,
-    )
-  }
-
-  const currency = (params.currency ?? 'usd').toLowerCase()
+  const unitAmount = toStripeUnitAmount(params.amount)
+  // Stripe wants the code lowercase; a Money always holds it uppercase.
+  const currency = params.amount.currency.toLowerCase()
 
   const form = new URLSearchParams({
     mode: 'payment',
     'line_items[0][price_data][currency]': currency,
     'line_items[0][price_data][product_data][name]': params.productName ?? params.reference,
-    'line_items[0][price_data][unit_amount]': String(amount),
+    'line_items[0][price_data][unit_amount]': String(unitAmount),
     'line_items[0][quantity]': '1',
     // client_reference_id is what the webhook reads; the metadata copy is what
     // a human reads in the dashboard during a dispute.
@@ -172,4 +171,27 @@ export function sessionPaymentIntentId(session: StripeCheckoutSessionObject): st
   const intent = session.payment_intent
   if (typeof intent === 'string') return intent
   return intent?.id ?? undefined
+}
+
+/**
+ * What the session actually collected, as a Money.
+ *
+ * `amount_total` is in the smallest currency unit and `currency` is lowercase,
+ * which is exactly a Money once the code is upper-cased — no scaling, and no
+ * chance of reading 500 as five hundred dollars.
+ */
+export function sessionAmount(session: StripeCheckoutSessionObject): Money | undefined {
+  const { amount_total: total, currency } = session
+  if (typeof total !== 'number' || !currency) return undefined
+  try {
+    return fromMinor(total, currency)
+  } catch {
+    return undefined
+  }
+}
+
+/** `'5.00'` from a session, for a receipt line. */
+export function sessionAmountMajor(session: StripeCheckoutSessionObject): string | undefined {
+  const money = sessionAmount(session)
+  return money ? toMajorString(money) : undefined
 }

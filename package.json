@@ -83,7 +83,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ronnyabuto/mpesa-stk.git"
+    "url": "git+https://github.com/rauell1/mpesa-stk.git"
   },
   "keywords": [
     "mpesa",
@@ -96,5 +96,9 @@
     "webhook",
     "webhook-relay",
     "callback"
-  ]
+  ],
+  "bugs": {
+    "url": "https://github.com/rauell1/mpesa-stk/issues"
+  },
+  "homepage": "https://github.com/rauell1/mpesa-stk#readme"
 }

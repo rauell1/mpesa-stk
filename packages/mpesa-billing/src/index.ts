@@ -17,18 +17,42 @@ export type {
   PaymentStatus,
   Rail,
   StripeConfig,
+  WebhookContext,
   WebhookReply,
   WebhookResult,
 } from './types.js'
-export { DEFAULT_CALLBACK_PATHS } from './types.js'
+export { DEFAULT_CALLBACK_PATHS, PAYOUT_RAILS, RAILS, isPayoutRail } from './types.js'
+
+// Money — every amount that crosses a boundary carries its currency.
+export {
+  MPESA_CURRENCY,
+  addMoney,
+  assertCurrency,
+  currencyExponent,
+  darajaAmountToMoney,
+  formatMoney,
+  fromMajor,
+  fromMinor,
+  isEqualMoney,
+  isSameCurrency,
+  stripeAmountToMoney,
+  toDarajaAmount,
+  toMajorString,
+  toMoney,
+  toStripeUnitAmount,
+} from './money.js'
+export type { Money, MoneyInput } from './money.js'
 
 export {
-  assertWholeAmount,
+  SAFARICOM_CALLBACK_CIDRS,
+  assertShortCode,
   baseUrl,
   callbackPaths,
   callbackUrl,
   darajaConfigFromEnv,
   eatTimestamp,
+  isIpAllowed,
+  normalisePem,
   normalisePhone,
   securityCredential,
   stkPassword,
@@ -36,15 +60,42 @@ export {
 } from './config.js'
 
 export {
+  parseC2B,
+  parsePayoutResult,
+  parsePayoutTimeout,
+  parseStkCallback,
+  // Kept as aliases so existing imports keep working.
   parseB2CResult,
   parseB2CTimeout,
-  parseC2B,
-  parseStkCallback,
 } from './callbacks.js'
-export type { ParsedB2CResult, ParsedC2B, ParsedStkCallback } from './callbacks.js'
+export type {
+  ParsedC2B,
+  ParsedPayoutResult,
+  ParsedStkCallback,
+  ResultParameter,
+} from './callbacks.js'
 
-export { getAccessToken, registerC2BUrls } from './daraja.js'
-export type { B2CCommand, B2CParams, StkPushParams } from './daraja.js'
+export { b2bPaymentRequest, b2cPaymentRequest, getAccessToken, registerC2BUrls, stkPush } from './daraja.js'
+export type {
+  B2BCommand,
+  B2BIdentifierType,
+  B2BParams,
+  B2BResponse,
+  B2CCommand,
+  B2CParams,
+  B2CResponse,
+  PayoutResponse,
+  RegisterUrlResponse,
+  StkPushParams,
+  StkPushResponse,
+} from './daraja.js'
 
-export { createCheckoutSession, verifyStripeSignature } from './stripe.js'
+export {
+  createCheckoutSession,
+  sessionAmount,
+  sessionAmountMajor,
+  sessionPaymentIntentId,
+  sessionReference,
+  verifyStripeSignature,
+} from './stripe.js'
 export type { CheckoutSession, CheckoutSessionParams, StripeEvent } from './stripe.js'
