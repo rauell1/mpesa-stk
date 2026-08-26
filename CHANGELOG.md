@@ -1,12 +1,10 @@
 # Changelog
 
-## Unreleased
+## `mpesa-billing` [0.2.0] — 2026-08-26
 
 Repository refocused on being a general-purpose M-PESA SDK: the application-specific
 example is gone, `mpesa-billing` gains the B2B rail, and every amount now carries its
 currency.
-
-### `mpesa-billing`
 
 #### Added
 
@@ -73,15 +71,33 @@ currency.
 - 71 → 215. New suites for `Money`, B2B settlement and its wire format, the whole
   outbound Daraja layer (previously untested), the Postgres adapter (previously
   untested), and caller verification.
+- **Two of those tests only passed on Node 22.** They verified the B2C/B2B
+  `SecurityCredential` by decrypting it with `privateDecrypt` and
+  `RSA_PKCS1_PADDING`, which Node rejects from 18.19.1 and 20.11.1 onward as the
+  mitigation for CVE-2023-46809. The library is unaffected — it uses
+  `publicEncrypt`, the direction Node never restricted and the only one Daraja
+  accepts. The tests now do the raw modular exponentiation with `RSA_NO_PADDING`
+  and strip the PKCS#1 v1.5 padding themselves, which keeps the assertion exact
+  and runs on every supported Node.
 
 ### Repository
 
 - **Removed the SafariCharge example** — its multi-tenant plan tiers, organization
   tables, and RLS migration were specific to one application. Replaced by
   `examples/billing-node/`, which shows the same wiring with no domain attached.
+- **CI now actually runs.** The repository was a fork, and GitHub disables Actions
+  on forks until they are enabled, so the workflow had never produced a single run
+  on any trigger. With the fork detached and Actions on, the first run immediately
+  caught the Node 18/20 test failure above — which every local run on Node 22 had
+  hidden.
+- The CI workflow gained `workflow_dispatch` (a run can be started without pushing
+  a commit), an explicit `permissions: contents: read`, and a concurrency group so
+  a new push cancels the run it supersedes.
 - Bumped `hono` and `@hono/node-server`, which the relay depends on at runtime, past
   their advisories.
-- `repository`, `bugs`, and `homepage` now point at this repository.
+- `repository`, `bugs`, and `homepage` now point at this repository, and the root
+  README now opens by orienting readers across both packages rather than assuming
+  STK Push.
 
 ## [0.3.1] — 2026-06-21
 

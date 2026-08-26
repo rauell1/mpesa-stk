@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { generateKeyPairSync, X509Certificate, createPrivateKey, privateDecrypt, constants } from 'node:crypto'
+import { generateKeyPairSync, X509Certificate } from 'node:crypto'
 import { MemoryStore } from '../src/adapters/memory.js'
 import {
   b2bPaymentRequest,
@@ -9,6 +9,7 @@ import {
   stkPush,
 } from '../src/daraja.js'
 import { fromMajor } from '../src/money.js'
+import { decryptPkcs1v15 } from './helpers/pkcs1.js'
 import type { DarajaConfig } from '../src/types.js'
 
 // The outbound half: what actually goes on the wire. These are the fields that
@@ -216,11 +217,7 @@ describe('b2cPaymentRequest', () => {
     expect(body['QueueTimeOutURL']).toBe('https://app.example.com/api/webhooks/mpesa/b2c/timeout')
 
     // The credential must be the initiator password, RSA-encrypted.
-    const decrypted = privateDecrypt(
-      { key: createPrivateKey(CERT.privateKey), padding: constants.RSA_PKCS1_PADDING },
-      Buffer.from(String(body['SecurityCredential']), 'base64'),
-    )
-    expect(decrypted.toString()).toBe('Safaricom999!*!')
+    expect(decryptPkcs1v15(CERT.privateKey, String(body['SecurityCredential']))).toBe('Safaricom999!*!')
   })
 
   it('refuses to send without the payout credentials', async () => {

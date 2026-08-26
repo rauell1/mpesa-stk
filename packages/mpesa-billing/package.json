@@ -1,6 +1,6 @@
 {
   "name": "mpesa-billing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable M-PESA (STK Push, C2B, B2C, B2B) and Stripe Checkout billing rails with exactly-once settlement and currency-safe amounts",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

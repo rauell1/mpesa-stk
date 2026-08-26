@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { generateKeyPairSync, privateDecrypt, createPrivateKey, constants } from 'node:crypto'
+import { generateKeyPairSync } from 'node:crypto'
 import { Billing } from '../src/billing.js'
 import { MemoryStore } from '../src/adapters/memory.js'
 import {
@@ -10,6 +10,7 @@ import {
   securityCredential,
 } from '../src/config.js'
 import { createWebhookRoutes } from '../src/next.js'
+import { decryptPkcs1v15 } from './helpers/pkcs1.js'
 
 // Safaricom signs nothing. Two things stand in for a signature: the published
 // callback IP ranges, and — for payouts — a certificate that has to survive
@@ -42,12 +43,9 @@ describe('normalisePem', () => {
 describe('securityCredential', () => {
   it('encrypts the initiator password under an escaped certificate — the deployment case', () => {
     const credential = securityCredential('Safaricom999!*!', PEM.replace(/\n/g, '\\n'))
+    const privateKeyPem = KEYS.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
 
-    const decrypted = privateDecrypt(
-      { key: createPrivateKey(KEYS.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()), padding: constants.RSA_PKCS1_PADDING },
-      Buffer.from(credential, 'base64'),
-    )
-    expect(decrypted.toString()).toBe('Safaricom999!*!')
+    expect(decryptPkcs1v15(privateKeyPem, credential)).toBe('Safaricom999!*!')
   })
 })
 
