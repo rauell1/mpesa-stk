@@ -109,4 +109,10 @@ Embedding, registration, and delivery-status endpoints: [examples/](./examples/)
 - [Next.js App Router](./examples/nextjs/)
 - [Express](./examples/express/server.ts)
 
+## Also in this repo
+
+**[`mpesa-billing`](./packages/mpesa-billing/)** — a sibling package covering four rails with one settlement contract: STK Push, C2B, B2C, and Stripe Checkout. It handles the two M-Pesa rails this library deliberately leaves out, plus a card rail, and gives them all the same exactly-once guard — but it has no poll fallback and no reconciliation, so for STK Push alone this library is the better tool. Use both together: this library for the STK lifecycle, `mpesa-billing`'s `applyOnSettle` for whatever a settled payment should cause.
+
+[SafariCharge](./examples/safaricharge/) is a worked example of it — multi-tenant plan tiers over all four rails.
+
 MIT

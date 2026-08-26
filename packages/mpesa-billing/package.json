@@ -1,0 +1,65 @@
+{
+  "name": "mpesa-billing",
+  "version": "0.1.0",
+  "description": "Portable M-PESA (STK Push, C2B, B2C) and Stripe Checkout billing rails with exactly-once settlement",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/index.d.mts", "default": "./dist/index.mjs" },
+      "require": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    },
+    "./adapters/memory": {
+      "import": { "types": "./dist/adapters/memory.d.mts", "default": "./dist/adapters/memory.mjs" },
+      "require": { "types": "./dist/adapters/memory.d.ts", "default": "./dist/adapters/memory.js" }
+    },
+    "./adapters/postgres": {
+      "import": { "types": "./dist/adapters/postgres.d.mts", "default": "./dist/adapters/postgres.mjs" },
+      "require": { "types": "./dist/adapters/postgres.d.ts", "default": "./dist/adapters/postgres.js" }
+    },
+    "./next": {
+      "import": { "types": "./dist/next.d.mts", "default": "./dist/next.mjs" },
+      "require": { "types": "./dist/next.d.ts", "default": "./dist/next.js" }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "pg": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mpesa",
+    "daraja",
+    "stripe",
+    "billing",
+    "payments",
+    "kenya",
+    "stk-push",
+    "c2b",
+    "b2c",
+    "webhook",
+    "idempotency"
+  ]
+}
