@@ -60,9 +60,11 @@
   ],
   "scripts": {
     "build": "tsup && npm run build --workspaces --if-present",
-    "typecheck": "tsc --noEmit && npm run typecheck --workspaces --if-present",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json && npm run typecheck --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest",
+    "sandbox:sink": "tsx scripts/sandbox/callback-sink.ts",
+    "sandbox:smoke": "tsx scripts/sandbox/smoke.ts",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
@@ -74,6 +76,7 @@
     "@types/node": "^20.0.0",
     "@types/pg": "^8.11.0",
     "tsup": "^8.5.1",
+    "tsx": "^4.23.13",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
   },
