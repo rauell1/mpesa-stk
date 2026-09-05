@@ -37,9 +37,15 @@ jobs:
       fail-fast: false
 
     steps:
-      - uses: actions/checkout@v4
+      # v4 of both actions runs on the Node 20 action runtime, which GitHub has
+      # deprecated: the runner force-runs them on Node 24 and warns on every
+      # job. v5 is where each moved to Node 24 natively; v7 is current. The
+      # majors in between hardened checkout against unsafe pull_request_target
+      # checkouts, which does not touch this workflow — it only ever checks out
+      # its own ref on push, workflow_dispatch, and same-repo pull requests.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
